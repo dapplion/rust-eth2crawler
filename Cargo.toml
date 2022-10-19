@@ -1,0 +1,17 @@
+[package]
+name = "eth2crawler"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+discv5 = { version = "0.1.0", features = ["libp2p"] }
+rlp = "0.5.1"
+tokio = { version = "1", features = ["full"] }
+# Simple KV DB
+sled = "0.34.7"
+# To print eth2 field nicely
+hex = "0.4.3"
+# ORM for SQL DBs
+sqlx = { version = "0.6", features = [ "runtime-tokio-native-tls" , "mysql" ] }
