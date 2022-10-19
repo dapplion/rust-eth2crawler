@@ -1,0 +1,3 @@
+[submodule "rust-discv5"]
+	path = rust-discv5
+	url = git@github.com:dapplion/rust-discv5.git

@@ -5,6 +5,7 @@ use sqlx::mysql::MySqlPool;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::env;
 
 use sqlx::{mysql::MySqlPoolOptions};
 
@@ -20,20 +21,13 @@ const ETHEREUM_MAINNET_BOOTNODES: [&str; 4] = [
 async fn main() {
     println!("rust-eth2crawler");
 
-    // postgresql://[user[:password]@][host][:port][/dbname][?param1=value1&...]
-    let url = "mysql://lion:password@localhost:3306/eth2nodes";
+    // mysql://[user[:password]@][host][:port][/dbname][?param1=value1&...]
+    // let database_url = "mysql://lion:password@localhost:3306/eth2nodes";
+    let database_url = env::var("DATABASE_URL").expect("Must provide DATABASE_URL env");
 
     let pool = MySqlPoolOptions::new()
         .max_connections(5)
-        .connect(&url).await.unwrap();
-
-    // # mysql user management
-    // ```
-    // sudo mysql -u root
-    // CREATE DATABASE eth2nodes;
-    // CREATE USER 'lion'@'localhost' IDENTIFIED BY 'password';
-    // GRANT ALL PRIVILEGES ON *.* TO 'lion'@'localhost' WITH GRANT OPTION;
-    // ```
+        .connect(&database_url).await.unwrap();
 
     // listening address and port
     let listen_addr = "0.0.0.0:9000".parse::<SocketAddr>().unwrap();
@@ -57,63 +51,67 @@ async fn main() {
     println!("Stared server on {:?}", listen_addr);
 
     // run a find_node query
-    let found_enrs = discv5.find_node(NodeId::random()).await.unwrap();
+    loop {
+        let found_enrs = discv5.find_node(NodeId::random()).await.unwrap();
 
-    println!("Found {:?} nodes", found_enrs.len());
+        println!("Found {:?} nodes", found_enrs.len());
 
-    for enr in found_enrs {
-        let node_id = enr.node_id();
+        for enr in found_enrs {
+            let node_id = enr.node_id();
 
-        let ip = if let Some(ip) = enr.ip4() {
-            ip
-        } else {
-            continue;
-        };
-
-        let eth2 = if let Some(eth2) = enr.get("eth2") {
-            eth2
-        } else {
-            continue;
-        };
-
-        // eth2 = (
-        //     fork_digest: ForkDigest
-        //     next_fork_version: Version
-        //     next_fork_epoch: Epoch
-        // )
-        if eth2.len() < 4 + 4 + 8 {
-            continue;
-        }
-        let fork_digest = &eth2[0..4];
-        let next_fork_version = &eth2[4..8];
-        let next_fork_epoch = &eth2[8..16];
-
-        let attnets: Option<&[u8]> = enr.get("attnets").map(|v| &v[0..8]);
-        let syncnets: Option<&[u8]> = enr.get("syncnets").map(|v| &v[0..1]);
-
-        println!("node {:?} {:?} {:?}", ip, hex::encode(eth2), hex::encode(node_id.raw()));
-
-        let enr_id = match db_insert_enr(&pool, ENRModel {
-            id: hash_enr(&enr),
-            node_id: &node_id.raw(),
-            seq: enr.seq(),
-            ip: &ip.octets(),
-            tcp: enr.tcp4(),
-            udp: enr.udp4(),
-            fork_digest,
-            next_fork_version,
-            next_fork_epoch,
-            attnets,
-            syncnets,
-            seen_timestamp: SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_secs(),
-            enr_txt: enr.to_base64()
-        }).await {
-            Ok(enr_id) => enr_id,
-            Err(error) => {
-                println!("Error insterting ENR: {:?}", error);
+            let ip = if let Some(ip) = enr.ip4() {
+                ip
+            } else {
                 continue;
-            },
-        };
+            };
+
+            let eth2 = if let Some(eth2) = enr.get("eth2") {
+                eth2
+            } else {
+                continue;
+            };
+
+            // eth2 = (
+            //     fork_digest: ForkDigest
+            //     next_fork_version: Version
+            //     next_fork_epoch: Epoch
+            // )
+            if eth2.len() < 4 + 4 + 8 {
+                continue;
+            }
+            let fork_digest = &eth2[0..4];
+            let next_fork_version = &eth2[4..8];
+            let next_fork_epoch = &eth2[8..16];
+
+            let attnets: Option<&[u8]> = enr.get("attnets").map(|v| &v[0..8]);
+            let syncnets: Option<&[u8]> = enr.get("syncnets").map(|v| &v[0..1]);
+
+            let id = hash_enr(&enr) as i64;
+
+            println!("node {:?} {:?} {:?} id {:?}", ip, hex::encode(eth2), hex::encode(node_id.raw()), id);
+
+            let enr_id = match db_insert_enr(&pool, ENRModel {
+                id,
+                node_id: &node_id.raw(),
+                seq: enr.seq() as i64,
+                ip: &ip.octets(),
+                tcp: enr.tcp4(),
+                udp: enr.udp4(),
+                fork_digest,
+                next_fork_version,
+                next_fork_epoch,
+                attnets,
+                syncnets,
+                seen_timestamp: SystemTime::now().duration_since(UNIX_EPOCH).expect("Time went backwards").as_secs(),
+                enr_txt: enr.to_base64()
+            }).await {
+                Ok(enr_id) => enr_id,
+                Err(error) => {
+                    println!("Error insterting ENR: {:?}", error);
+                    continue;
+                },
+            };
+        }
     }
 
     // Crawler has to:
@@ -121,9 +119,6 @@ async fn main() {
     // - Ping ENRs to ensure they are alive
     // - Run identity libp2p protocol to gather data
     // - Do a status query to check if nodes are synced
-
-    // DB Model
-    // - Store all ENRs
 }
 
 fn hash_enr(enr: &enr::Enr<CombinedKey>) -> u64 {
@@ -134,10 +129,10 @@ fn hash_enr(enr: &enr::Enr<CombinedKey>) -> u64 {
 }
 
 pub struct ENRModel<'a> {
-    /// Digest of the full ENR for unique identification
-    pub id: u64,
+    /// Digest of the full ENR for unique identification, SQL suppors only signed types
+    pub id: i64,
     pub node_id: &'a[u8],
-    pub seq: u64,
+    pub seq: i64, // SQL suppors only signed types
     pub ip: &'a[u8],
     pub tcp: Option<u16>,
     pub udp: Option<u16>,
